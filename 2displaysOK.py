@@ -3,6 +3,7 @@ import random
 import sys
 from multiprocessing import Process, Pipe
 import os
+import subprocess
 
 # ----------------------------------------------------------
 #  НАБОР — фигура + её родной цвет
@@ -62,24 +63,16 @@ DRAW_FUNCS = {
 #    ГЕНЕРАЦИЯ ДВУХ НЕПРАВИЛЬНЫХ ФИГУР ДЛЯ HDMI
 # ----------------------------------------------------------
 def generate_two_wrong():
-    """Две фигуры на HDMI: неправильные цвета и всегда разные цвета."""
     shapes = random.sample(FIGURE_ORDER, 2)
     result = []
-
     used_colors = set()
 
     for sh in shapes:
         natural = NATURAL_COLORS[sh]
-
-        # все НЕнатуральные цвета
         wrong_colors = [c for c in NATURAL_COLORS.values() if c != natural]
-
-        # исключаем уже использованные цвета
         available = [c for c in wrong_colors if c not in used_colors]
 
-        # в нормальном наборе цветов такого всегда хватает
         color = random.choice(available)
-
         used_colors.add(color)
         result.append((sh, color))
 
@@ -107,7 +100,6 @@ def hdmi_window(pipe):
             x = 1024 // 3 if i == 0 else 2 * 1024 // 3
             func(screen, x, 300, color)
 
-        # команды из DSI
         if pipe.poll():
             cmd = pipe.recv()
             if cmd == "refresh":
@@ -137,6 +129,7 @@ def dsi_window(pipe):
 
     FONT = pygame.font.SysFont(None, 48)
 
+    # кнопка обновления
     bw, bh = 300, 80
     button_rect = pygame.Rect(
         screen.get_width()//2 - bw//2,
@@ -144,25 +137,26 @@ def dsi_window(pipe):
         bw, bh
     )
 
-    # получаем стартовые данные (список пар (shape, color))
+    # --------------------- КНОПКА ВЫКЛЮЧЕНИЯ -------------------------
+    shutdown_rect = pygame.Rect(20, 20, 110, 40)   # левый верхний угол
+
+    # получаем стартовые фигуры
     figures = pipe.recv()
 
-    # ---- вычислить недостающую фигуру так, чтобы ни форма, ни цвет не совпадали ----
+    # ---- вычислить правильную фигуру ----
     def compute_correct(figs):
         used_shapes = {shape for shape, _ in figs}
-        used_colors = {tuple(color) if isinstance(color, (list, tuple)) else color for _, color in figs}
-        # ищем фигуру, у которой shape не в used_shapes И натур.цвет не в used_colors
+        used_colors = {tuple(color) for _, color in figs}
+
         for sh in FIGURE_ORDER:
-            nat_color = NATURAL_COLORS[sh]
-            # normalize nat_color to tuple for comparison
-            nat_color_t = tuple(nat_color) if isinstance(nat_color, (list, tuple)) else nat_color
-            if (sh not in used_shapes) and (nat_color_t not in used_colors):
-                return sh, nat_color
-        # Форсированный fallback (маловероятно): вернём любую форму, которая не использована, с её натуральным цветом
+            nat_color = tuple(NATURAL_COLORS[sh])
+            if sh not in used_shapes and nat_color not in used_colors:
+                return sh, NATURAL_COLORS[sh]
+
         for sh in FIGURE_ORDER:
             if sh not in used_shapes:
                 return sh, NATURAL_COLORS[sh]
-        # совсем крайний случай
+
         return FIGURE_ORDER[0], NATURAL_COLORS[FIGURE_ORDER[0]]
 
     correct = compute_correct(figures)
@@ -171,26 +165,45 @@ def dsi_window(pipe):
     while running:
         screen.fill((255, 255, 255))
 
-        # рисуем правильную фигуру
+        # ----- правильная фигура -----
         func = DRAW_FUNCS[correct[0]]
         func(screen, screen.get_width()//2, 220, correct[1])
 
-        # кнопка
+        # ----- кнопка ОБНОВИТЬ -----
         pygame.draw.rect(screen, (220, 220, 220), button_rect)
         pygame.draw.rect(screen, (0, 0, 0), button_rect, 3)
-        txt = FONT.render("ОБНОВИТЬ", True, (0, 0, 0))
-        screen.blit(txt, (button_rect.x + 45, button_rect.y + 20))
+        screen.blit(FONT.render("ОБНОВИТЬ", True, (0, 0, 0)),
+                    (button_rect.x + 45, button_rect.y + 20))
+
+        # ----- кнопка SHUTDOWN -----
+        pygame.draw.rect(screen, (255, 0, 0), shutdown_rect)
+        pygame.draw.rect(screen, (0, 0, 0), shutdown_rect, 3)
+        SHUTDOWN_FONT = pygame.font.SysFont(None, 24)
+        screen.blit(SHUTDOWN_FONT.render("SHUTDOWN", True, (255, 255, 255)),
+                    (shutdown_rect.x + 5, shutdown_rect.y + 15))
+        #screen.blit(FONT.render("SHUTDOWN", True, (255, 255, 255)),
+        #           (shutdown_rect.x + 5, shutdown_rect.y + 15))
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
+
             if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                 running = False
+
             if event.type == pygame.MOUSEBUTTONDOWN:
+
+                # ОБНОВИТЬ
                 if button_rect.collidepoint(event.pos):
                     pipe.send("refresh")
                     figures = pipe.recv()
                     correct = compute_correct(figures)
+
+                # SHUTDOWN
+                if shutdown_rect.collidepoint(event.pos):
+                    pygame.quit()
+                    subprocess.call(["sudo", "shutdown", "-h", "now"])
+                    sys.exit()
 
         pygame.display.flip()
 
